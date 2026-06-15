@@ -891,29 +891,30 @@ def InsertPlanarFromDistribution(
     zmax: float | None = None,
     distance: float = 1.25,
     probability: Callable | None = None,
-    n_points: int = 1000,
     fudge_factor: float = 1.2,
     n_tries: int = 1000,
+    n_grid_points: int = 1000,
+    dim: int = 2,
 ) -> mda.Universe:
 
     def insert_ions(
         TargetUniverse,
         ProjectileUniverse,
         InsertionDomain,
-        z_positions,
+        positions,
         n,
         distance,
         n_tries
     ):
         """
-        Insert ions into the target universe at specified z positions.
+        Insert ions into the target universe at specified positions.
 
         Positional arguments:
-        TargetUniverse   -- The universe to insert ions into.
+        TargetUniverse     -- The universe to insert ions into.
         ProjectileUniverse -- The universe containing the ions to insert.
-        z_positions       -- The z positions to insert the ions at.
-        distance          -- Minimum distance between inserted ions and existing atoms.
-        n_tries             -- Number of attempts to find a valid insertion position.
+        positions          -- The positions to insert the ions at.
+        distance           -- Minimum distance between inserted ions and existing atoms.
+        n_tries            -- Number of attempts to find a valid insertion position.
 
         Returns:
         Updated TargetUniverse with inserted ions.
@@ -928,11 +929,10 @@ def InsertPlanarFromDistribution(
             TargetUniverse.dimensions = dimensionsTarget
 
             t_vec = pos_random(InsertionDomain) - ProjectileUniverse.atoms.center_of_geometry()
-            first_z_position = z_positions[0]
-            z_positions = np.delete(z_positions, 0) # Remove the first z position as it's already used
+            first_z_position = positions[0]
+            positions = np.delete(positions, 0) # Remove the first z position as it's already used
 
-
-            t_vec[2] = first_z_position - ProjectileUniverse.atoms.center_of_geometry()[2]
+            t_vec[dim] = first_z_position - ProjectileUniverse.atoms.center_of_geometry()[dim]
             TargetUniverse.atoms.translate(
                 t_vec
             )
@@ -958,7 +958,7 @@ def InsertPlanarFromDistribution(
                 next_z = z_positions[0]
                 z_positions = np.delete(z_positions, 0) # Remove the first z position as it's already used
 
-                t_vec[2] = next_z - projectile.atoms.center_of_geometry()[2]
+                t_vec[dim] = next_z - projectile.atoms.center_of_geometry()[dim]
                 projectile.translate(t_vec)
                 projectile.rotateby(*rot_random())
 
@@ -1002,11 +1002,11 @@ def InsertPlanarFromDistribution(
     # Draw more than needed ions to account for rejections during insertion
     # NIonsToDraw = np.ceil(n * fudge_factor).astype(int)
 
-    z = np.linspace(zmin, zmax, n_points)
+    grid = np.linspace(InsertionDomain[dim], InsertionDomain[dim + 3], n_grid_points)
     if probability is None:
         raise ValueError("A probability distribution function must be provided.")
     try:
-        p = probability.calculate_p(z)
+        p = probability.calculate_p(grid)
     except Exception as exc:
         raise ValueError("The provided probability function is not valid.") from exc
 
@@ -1014,12 +1014,11 @@ def InsertPlanarFromDistribution(
 
     samples = np.random.choice(len(p), size=positionsToDraw, p=p)
     # Convert indices to z positions
-    z_positions = z[samples]
-
+    positions = grid[samples]
 
     # Insert ions into the TargetUniverse
     TargetUniverse = insert_ions(
-        TargetUniverse, ProjectileUniverse, InsertionDomain, z_positions, n, distance, n_tries)
+        TargetUniverse, ProjectileUniverse, InsertionDomain, positions, n, distance, n_tries)
 
     return TargetUniverse
 
@@ -1038,13 +1037,15 @@ def PlanarPoissonBoltzmann(
     xmax: float | None = None,
     ymax: float | None = None,
     zmax: float | None = None,
+    dim: int = 2,
+    n_grid_points: int = 1000,
     distance: float = 1.25,
     fudge_factor: float = 1.5,
     n_tries: int = 100,
 ) -> mda.Universe:
     """
     Inserts ions into a system with plate capacitor geometry according to a Poisson-Boltzmann
-    distribution.
+    distribution. 
 
     Positional arguments:
     TargetUniverse           -- MDAnalysis Universe of the target system.
@@ -1054,14 +1055,16 @@ def PlanarPoissonBoltzmann(
     N_cations                -- Number of cations to insert.
 
     Keyword arguments:
-    epsilon_r                -- Relative permittivity of the medium.
+    epsilon_r                -- Relative permittivity of the dielectricum (dimensionless).
     T                        -- Temperature in Kelvin.
     q_diff                   -- Total charge difference between cations and anions.
     xmin, ymin, zmin         -- Minimum coordinates of the insertion domain.
     xmax, ymax, zmax         -- Maximum coordinates of the insertion domain.
+    dim                      -- Dimension orthogonal to the plates (0 = x, 1 = y, 2 = z).
+    n_grid_points            -- Number of grid points for calculating the potential profile.
     distance                 -- Minimum distance between inserted ions and existing atoms.
     fudge_factor             -- Fudge factor for number of inserted ions.
-    n_tries                    -- Number of attempts to find a valid insertion position.
+    n_tries                  -- Number of attempts to find a valid insertion position.
 
     Returns:
     Solvated Universe with inserted ions.
@@ -1072,7 +1075,7 @@ def PlanarPoissonBoltzmann(
         Calculate the Debye length.
         
         Positional arguments:
-        epsilon_r   -- Relative permittivity of the medium.
+        epsilon_r   -- Relative permittivity of the dielectricum (dimensionless).
         T           -- Temperature in Kelvin.
         cN_bulk_cat -- Bulk concentration of cations in 1/Å³.
         cN_bulk_an  -- Bulk concentration of anions in 1/Å³.
@@ -1083,36 +1086,36 @@ def PlanarPoissonBoltzmann(
 
         return np.sqrt(epsilon_r * epsilon_0 * kB * T / (2 * e**2 * (cN_bulk_cat + cN_bulk_an)/2))
 
-    def electrostatic_potential_z(sigma, lambda_D, z, epsilon_r):
+    def electrostatic_potential_profile(sigma, lambda_D, z, epsilon_r):
         """
-        Calculate the electrostatic potential profile in z-direction.
+        Calculate the electrostatic potential profile.
         
         Positional arguments:
-        sigma      -- Surface charge density.
-        lambda_D   -- Debye length.
-        z          -- Distance from the charged surface.
-        epsilon_r  -- Relative permittivity of the medium.
+        sigma      -- Surface charge density in e/Å².
+        lambda_D   -- Debye length in Å.
+        z          -- Distance from the charged surface in Å.
+        epsilon_r  -- Relative permittivity of the dielectricum (dimensionless).
         
         Returns:
-        Electrostatic potential profile in z-direction.
+        Electrostatic potential profile in V.
         """
 
-        return sigma / (epsilon_r * epsilon_0) * lambda_D * np.exp(-z / lambda_D)
+        return sigma / (epsilon_r * epsilon_0 * e) * lambda_D * np.exp(-z / lambda_D)
 
     def pb_factor_profile(q, T, phi):
         """
-        Calculate the Poisson-Boltzmann factor profile in z-direction.
+        Calculate the Poisson-Boltzmann factor profile.
         
         Positional arguments:
-        q    -- Charge of the ion.
-        T    -- Temperature.
-        phi  -- Electrostatic potential profile.
+        q    -- Charge of the ion in e.
+        T    -- Temperature in K.
+        phi  -- Electrostatic potential profile in V.
         
         Returns:
-        Poisson-Boltzmann factor profile in z-direction.
+        Poisson-Boltzmann factor profile in .
         """
 
-        p = np.exp(-q * phi / (kB * T))
+        p = np.exp(-q * e * phi / (kB * T))
         p /= np.sum(p)
         return p
 
@@ -1240,33 +1243,30 @@ def PlanarPoissonBoltzmann(
     dimensionsTarget = TargetUniverse.dimensions.copy()
 
     # Calculate surface charge densities
-    sigma_1 = q_1 / (InsertionDomainSize[0] * InsertionDomainSize[1])
-    sigma_2 = q_2 / (InsertionDomainSize[0] * InsertionDomainSize[1])
-    print(f"Surface charge density 1: {
-        sigma_1.to('elementary_charge / angstrom^2').magnitude:.5f} e/Å²")
-    print(f"Surface charge density 2: {
-        sigma_2.to('elementary_charge / angstrom^2').magnitude:.5f} e/Å²")
+    area = np.prod(np.delete(InsertionDomainSize, dim)) # angstrom^2
+    sigma_1 = q_1 / area
+    sigma_2 = q_2 / area
+    print(f"Surface charge density 1: {sigma_1} e/Å²")
+    print(f"Surface charge density 2: {sigma_2} e/Å²")
 
-    # Calculate bulk concentration --> needed for Debye length
-    volume = (InsertionDomainSize[0]
-              * InsertionDomainSize[1]
-              * InsertionDomainSize[2])
+    # Calculate bulk concentration
+    volume = np.prod(InsertionDomainSize) # angstrom^3
     cN_bulk_cat = N_cations / volume
     cN_bulk_an  = N_anions / volume
 
-    # Create a grid of z values
-    z = np.linspace(0, InsertionDomainSize[2], 500)
+    # Grid in dim-direction
+    grid = np.linspace(0, InsertionDomainSize[dim], n_grid_points)
 
     # Calculate Debye length
     l_D = debye_length(epsilon_r, T, cN_bulk_cat, cN_bulk_an)
-    print(f"Debye length : {l_D.to('angstrom').magnitude:.2f} Å")
+    print(f"Debye length : {l_D:.2f} Å")
 
     # Calculate potential profiles
-    phi_1 = electrostatic_potential_z(sigma_1, l_D, z, epsilon_r)
-    phi_2 = electrostatic_potential_z(sigma_2, l_D, InsertionDomainSize[2] - z, epsilon_r)
+    phi_1 = electrostatic_potential_profile(sigma_1, l_D, grid, epsilon_r)
+    phi_2 = electrostatic_potential_profile(sigma_2, l_D, InsertionDomainSize[dim] - grid, epsilon_r)
     phi_total = phi_1 + phi_2
     print(f'Potential difference between plates: {
-        (phi_total[0] - phi_total[-1]).to("volt").magnitude:.2f} V')
+        (phi_total[0] - phi_total[-1]):.2f} V')
 
     # Calculate Poisson-Boltzmann factor profiles
     pbfp_anions = pb_factor_profile(-e, T, phi_total)
@@ -1277,34 +1277,34 @@ def PlanarPoissonBoltzmann(
     N_cations_to_draw = np.ceil(N_cations * fudge_factor).astype(int)
 
     # Generate z positions based on Poisson-Boltzmann distribution
-    z_positions_anions = generate_z_positions(pbfp_anions, N_anions_to_draw, z)
-    z_positions_cations = generate_z_positions(pbfp_cations, N_cations_to_draw, z)
+    positions_anions = generate_z_positions(pbfp_anions, N_anions_to_draw, grid)
+    positions_cations = generate_z_positions(pbfp_cations, N_cations_to_draw, grid)
 
     # Remove positions that are too close to the plates
-    z_positions_anions = z_positions_anions[
-        (z_positions_anions > distance) &
-        (z_positions_anions < (InsertionDomainSize[2] - distance))
+    positions_anions = positions_anions[
+        (positions_anions > distance) &
+        (positions_anions < (InsertionDomainSize[dim] - distance))
     ]
-    z_positions_cations = z_positions_cations[
-        (z_positions_cations > distance) &
-        (z_positions_cations < (InsertionDomainSize[2] - distance))
+    positions_cations = positions_cations[
+        (positions_cations > distance) &
+        (positions_cations < (InsertionDomainSize[dim] - distance))
     ]
 
     # Select only the required number of ions
-    z_positions_anions = z_positions_anions[0:N_anions]
-    z_positions_cations = z_positions_cations[0:N_cations]
+    positions_anions = positions_anions[0:N_anions]
+    positions_cations = positions_cations[0:N_cations]
 
-    print(len(z_positions_anions), "anions to be inserted.")
-    print(len(z_positions_cations), "cations to be inserted.")
+    print(len(positions_anions), "anions to be inserted.")
+    print(len(positions_cations), "cations to be inserted.")
 
     # Adjust z positions to absolute coordinates (to be improved)
-    z_positions_anions = z_positions_anions + zmin
-    z_positions_cations = z_positions_cations + zmin
+    positions_anions = positions_anions + zmin
+    positions_cations = positions_cations + zmin
 
     # Insert ions into the TargetUniverse
     TargetUniverse = insert_ions(
-        TargetUniverse, AnionProjectileUniverse, z_positions_anions, distance, n_tries)
+        TargetUniverse, AnionProjectileUniverse, positions_anions, distance, n_tries)
     TargetUniverse = insert_ions(
-        TargetUniverse, CationProjectileUniverse, z_positions_cations, distance, n_tries)
+        TargetUniverse, CationProjectileUniverse, positions_cations, distance, n_tries)
 
     return TargetUniverse
